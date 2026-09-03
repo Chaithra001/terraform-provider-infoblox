@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
@@ -18,6 +20,7 @@ import (
 	uddioption "github.com/infobloxopen/universal-ddi-go-client/option"
 
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/provider"
+	"github.com/infobloxopen/terraform-provider-infoblox/internal/utils"
 )
 
 const (
@@ -218,6 +221,24 @@ func RandomIPv6Network() string {
 	return fmt.Sprintf("2001:db8:%x:%x::/%d", third, fourth, cidr)
 }
 
+// RandomIPv6NetworkAddress generates a random /64-aligned IPv6 network address, without a prefix length.
+func RandomIPv6NetworkAddress() string {
+	return fmt.Sprintf("2001:db8:%x:%x::", rand.Intn(65536), rand.Intn(65536))
+}
+
+// RandomIPv6NetworkWith4BitBoundary generates a random IPv6 network with a CIDR
+// that is a 4-bit boundary (multiple of 4). This is required for operations like
+// auto_create_reversezone which only supports 4-bit boundary CIDRs.
+func RandomIPv6NetworkWith4BitBoundary() string {
+	third := rand.Intn(65536)  // 0-FFFF for third hextet
+	fourth := rand.Intn(65536) // 0-FFFF for fourth hextet
+	// Valid 4-bit boundary CIDRs for IPv6: multiples of 4 between 64 and 124
+	validCidrs := []int{64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124}
+	cidr := validCidrs[rand.Intn(len(validCidrs))]
+
+	return fmt.Sprintf("2001:db8:%x:%x::/%d", third, fourth, cidr)
+}
+
 // RandomAlphaNumeric generates a random alphanumeric string of the specified length.
 func RandomAlphaNumeric(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -244,8 +265,8 @@ func Random32Hexadecimal() string {
 	return fmt.Sprintf("%016x%016x", rand.Uint64(), rand.Uint64())
 }
 
-// TfvarsExists checks if a tfvars file exists.
-func TfvarsExists(relativePath string) bool {
+// CaseFileExists checks if a case file exists.
+func CaseFileExists(relativePath string) bool {
 	if packageDir == "" {
 		return false
 	}
@@ -267,16 +288,24 @@ func ResolvePlaceholder(placeholder string) string {
 	switch {
 	case name == "random_octet":
 		return fmt.Sprintf("%d", 1+rand.Intn(254)) // 1-254 valid IP host octet
+	case name == "random_hextet":
+		return fmt.Sprintf("%x", rand.Intn(65536)) // 0-FFFF single IPv6 hextet
 	case name == "grid_master_hostname":
 		return os.Getenv("NIOS_GRID_MASTER_HOSTNAME")
 	case name == "grid_member_hostname":
 		return os.Getenv("NIOS_GRID_MEMBER_HOSTNAME")
+	case name == "grid_member_2_hostname":
+		return os.Getenv("NIOS_GRID_MEMBER_2_HOSTNAME")
 	case name == "discovery_member_hostname":
 		return os.Getenv("NIOS_DISCOVERY_MEMBER_HOSTNAME")
 	case name == "pxgrid_endpoint_ref":
 		return os.Getenv("NIOS_PXGRID_ENDPOINT_REF")
 	case strings.HasPrefix(name, "random_int"):
 		return fmt.Sprintf("%d", 1+rand.Intn(9999))
+	case strings.HasPrefix(name, "random_ipv6_network_address"):
+		return RandomIPv6NetworkAddress()
+	case strings.HasPrefix(name, "random_ipv6_network_4bit_boundary"):
+		return RandomIPv6NetworkWith4BitBoundary()
 	case strings.HasPrefix(name, "random_ipv6_network"):
 		return RandomIPv6Network()
 	case strings.HasPrefix(name, "random_ipv6"):
@@ -291,9 +320,23 @@ func ResolvePlaceholder(placeholder string) string {
 		return Random32Hexadecimal()
 	case strings.HasPrefix(name, "random_ip"):
 		return RandomIP()
+	case strings.HasPrefix(name, "future_time"):
+		return FutureTime(name)
 	default:
 		return RandomNameWithPrefix("tf-acc-test")
 	}
+}
+
+// FutureTime resolves a "future_time_<N>h" token to a timestamp N hours from now,
+// formatted per utils.NaiveDatetimeLayout. Falls back to a 24-hour offset if N is missing/invalid.
+func FutureTime(name string) string {
+	hours := 24
+	if suffix, ok := strings.CutSuffix(strings.TrimPrefix(name, "future_time_"), "h"); ok {
+		if n, err := strconv.Atoi(suffix); err == nil {
+			hours = n
+		}
+	}
+	return time.Now().Add(time.Duration(hours) * time.Hour).UTC().Format(utils.NaiveDatetimeLayout)
 }
 
 // ReplacePlaceholders substitutes all {{token}} placeholders in content with random or env-sourced values.

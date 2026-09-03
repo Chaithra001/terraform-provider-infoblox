@@ -20,9 +20,16 @@ import (
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/core"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/flex"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/retry"
+	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/acl"
+	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/dhcp"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/dns"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/dtc"
+	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/grid"
+	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/dtc"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/ipam"
+	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/keys"
+	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/misc"
+	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/rpz"
 	uddiclient "github.com/infobloxopen/universal-ddi-go-client/client"
 	uddioption "github.com/infobloxopen/universal-ddi-go-client/option"
 )
@@ -56,6 +63,7 @@ type (
 		PortalKey          types.String `tfsdk:"portal_key"`
 		NIOSLicenseUID     types.String `tfsdk:"nios_license_uid"`
 		EnableNIOSPassthru types.Bool   `tfsdk:"enable_nios_passthru"`
+		DefaultTags        types.Map    `tfsdk:"default_tags"`
 	}
 )
 
@@ -129,6 +137,11 @@ func buildUDDIAttribute() schema.Attribute {
 				MarkdownDescription: "Enable NIOS WAPI passthrough to manage objects on a NIOS Grid through the Infoblox Portal. Requires the NIOS Grid to be connected to the Portal. Default value: false",
 				Optional:            true,
 			},
+			"default_tags": schema.MapAttribute{
+				ElementType:         types.StringType,
+				MarkdownDescription: "Tags applied to every UDDI object the provider creates or updates. A tag set on the resource itself takes precedence over the default of the same name. Not applicable when `enable_nios_passthru` is true.",
+				Optional:            true,
+			},
 		},
 	}
 }
@@ -189,6 +202,14 @@ func (p *InfobloxProvider) Configure(ctx context.Context, req provider.Configure
 
 		// Passthrough reaches NIOS through the Infoblox Portal, so the backend is NIOS.
 		if data.UDDI.EnableNIOSPassthru.ValueBool() {
+			if !data.UDDI.DefaultTags.IsNull() {
+				resp.Diagnostics.AddError(
+					"Invalid Configuration",
+					"'uddi.default_tags' is not applicable when 'uddi.enable_nios_passthru' is true. Remove 'default_tags' to manage NIOS through the Infoblox Portal.",
+				)
+				return
+			}
+
 			if data.UDDI.PortalURL.IsUnknown() || data.UDDI.PortalKey.IsUnknown() || data.UDDI.NIOSLicenseUID.IsUnknown() {
 				resp.Diagnostics.AddError(
 					"Invalid Configuration",
@@ -207,8 +228,16 @@ func (p *InfobloxProvider) Configure(ctx context.Context, req provider.Configure
 			if data.UDDI.NIOSLicenseUID.ValueString() != "" {
 				resp.Diagnostics.AddError(
 					"Invalid Configuration",
-					"'uddi.nios_license_uid' is set but 'uddi.enable_nios_passthru' is not true. Set 'enable_nios_passthru = true' to manage NIOS through the Infoblox Portal, or remove the license UID to manage UDDI objects.",
+					"'uddi.nios_license_uid' is set but 'uddi.enable_nios_passthru' is not true.\n\n"+
+						"For NIOS via the Infoblox Portal: set 'enable_nios_passthru = true' and 'portal_url' to the Portal's WAPI passthrough endpoint.\n"+
+						"For UDDI objects: remove 'uddi.nios_license_uid' and set 'portal_url' to the Portal's CSP endpoint.\n\n"+
+						"These are different URLs, so 'portal_url' must match the mode.",
 				)
+				return
+			}
+
+			defaultTags := expandDefaultTags(ctx, data.UDDI.DefaultTags, resp)
+			if resp.Diagnostics.HasError() {
 				return
 			}
 
@@ -216,6 +245,7 @@ func (p *InfobloxProvider) Configure(ctx context.Context, req provider.Configure
 				uddioption.WithClientName(fmt.Sprintf("terraform/%s#%s", p.version, p.commit)),
 				uddioption.WithCSPUrl(data.UDDI.PortalURL.ValueString()),
 				uddioption.WithAPIKey(data.UDDI.PortalKey.ValueString()),
+				uddioption.WithDefaultTags(defaultTags),
 				uddioption.WithDebug(true),
 			)
 
@@ -232,6 +262,17 @@ func (p *InfobloxProvider) Configure(ctx context.Context, req provider.Configure
 	resp.DataSourceData = &infobloxClient
 	resp.ResourceData = &infobloxClient
 	resp.ListResourceData = &infobloxClient
+}
+
+func expandDefaultTags(ctx context.Context, tags types.Map, resp *provider.ConfigureResponse) map[string]string {
+	if tags.IsNull() || tags.IsUnknown() {
+		return nil
+	}
+
+	defaultTags := make(map[string]string, len(tags.Elements()))
+	resp.Diagnostics.Append(tags.ElementsAs(ctx, &defaultTags, false)...)
+
+	return defaultTags
 }
 
 // newNIOSPassthruClient builds a NIOS client that reaches a Grid through the Infoblox Portal.
@@ -288,70 +329,205 @@ func ensureNIOSPreRequisites(
 
 func (p *InfobloxProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
+		acl.NewNamedaclResource,
+
+		dhcp.NewDhcpOptiondefinitionResource,
+		dhcp.NewDhcpOptionspaceResource,
+		dhcp.NewFilteroptionResource,
+		dhcp.NewHaGroupResource,
+		dhcp.NewIpv6DhcpOptiondefinitionResource,
+		dhcp.NewIpv6DhcpOptionspaceResource,
+		dhcp.NewIpv6fixedaddressResource,
+
+		dns.NewAuthNsgResource,
+		dns.NewDnsServerResource,
+		dns.NewForwardNsgResource,
+		dns.NewNsgroupResource,
+		dns.NewRecordAResource,
 		dtc.NewDtcLbdnResource,
 		dns.NewRecordSrvResource,
 		dns.NewRecordNaptrResource,
 		dns.NewRecordMxResource,
 		dns.NewRecordCnameResource,
 		dns.NewRecordAaaaResource,
-		dns.NewRecordTxtResource,
+		dns.NewRecordAliasResource,
 		dns.NewRecordCaaResource,
+		dns.NewRecordPtrResource,
+		dns.NewRecordCnameResource,
 		dns.NewRecordDnameResource,
+		dns.NewRecordMxResource,
+		dns.NewRecordNaptrResource,
 		dns.NewRecordNsResource,
-		dns.NewZoneAuthResource,
+		dns.NewRecordSrvResource,
+		dns.NewRecordTxtResource,
+		dns.NewSharedrecordAResource,
+		dns.NewSharedrecordAaaaResource,
 		dns.NewViewResource,
-		dns.NewRecordAResource,
+		dns.NewZoneAuthResource,
+		dns.NewZoneDelegatedResource,
+		dns.NewZoneForwardResource,
+		dns.NewZoneRpResource,
+
+		dtc.NewDtcPoolResource,
+		dtc.NewDtcServerResource,
+
+		grid.NewExtensibleattributedefResource,
+		grid.NewNatgroupResource,
+		grid.NewUpgradegroupResource,
 
 		ipam.NewAddressResource,
+		ipam.NewIpv6networkResource,
+		ipam.NewIpv6networkcontainerResource,
 		ipam.NewNetworkResource,
 		ipam.NewNetworkcontainerResource,
+		ipam.NewNetworkviewResource,
+
+		keys.NewTsigKeyResource,
+
+		misc.NewBfdtemplateResource,
+		misc.NewRulesetResource,
+
+		rpz.NewRecordRpzCnameClientipaddressdnResource,
+		rpz.NewRecordRpzNaptrResource,
+		rpz.NewRecordRpzTxtResource,
+		rpz.NewRecordRpzAaaaIpaddressResource,
 	}
 }
 
 func (p *InfobloxProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
+		acl.NewNamedaclDataSource,
+
+		dhcp.NewDhcpOptiondefinitionDataSource,
+		dhcp.NewDhcpOptionspaceDataSource,
+		dhcp.NewFilteroptionDataSource,
+		dhcp.NewHaGroupDataSource,
+		dhcp.NewIpv6DhcpOptiondefinitionDataSource,
+		dhcp.NewIpv6DhcpOptionspaceDataSource,
+		dhcp.NewIpv6fixedaddressDataSource,
+
+		dns.NewAuthNsgDataSource,
+		dns.NewDnsServerDataSource,
+		dns.NewForwardNsgDataSource,
+		dns.NewNsgroupDataSource,
+		dns.NewRecordADataSource,
 		dtc.NewDtcLbdnDataSource,
 		dns.NewRecordSrvDataSource,
 		dns.NewRecordNaptrDataSource,
 		dns.NewRecordMxDataSource,
 		dns.NewRecordCnameDataSource,
 		dns.NewRecordAaaaDataSource,
-		dns.NewRecordTxtDataSource,
+		dns.NewRecordAliasDataSource,
 		dns.NewRecordCaaDataSource,
+		dns.NewRecordPtrDataSource,
+		dns.NewRecordCnameDataSource,
 		dns.NewRecordDnameDataSource,
+		dns.NewRecordMxDataSource,
+		dns.NewRecordNaptrDataSource,
 		dns.NewRecordNsDataSource,
-		dns.NewZoneAuthDataSource,
+		dns.NewRecordSrvDataSource,
+		dns.NewRecordTxtDataSource,
+		dns.NewSharedrecordADataSource,
+		dns.NewSharedrecordAaaaDataSource,
 		dns.NewViewDataSource,
-		dns.NewRecordADataSource,
+		dns.NewZoneAuthDataSource,
+		dns.NewZoneDelegatedDataSource,
+		dns.NewZoneForwardDataSource,
+		dns.NewZoneRpDataSource,
 
-		ipam.NewNextAvailableIPDataSource,
-		ipam.NewNextAvailableSubnetDataSource,
-		ipam.NewNextAvailableAddressBlockDataSource,
+		dtc.NewDtcPoolDataSource,
+		dtc.NewDtcServerDataSource,
+
+		grid.NewExtensibleattributedefDataSource,
+		grid.NewNatgroupDataSource,
+		grid.NewUpgradegroupDataSource,
+
 		ipam.NewAddressDataSource,
+		ipam.NewIpv6networkDataSource,
+		ipam.NewIpv6networkcontainerDataSource,
 		ipam.NewNetworkDataSource,
 		ipam.NewNetworkcontainerDataSource,
+		ipam.NewNetworkviewDataSource,
+		ipam.NewNextAvailableAddressBlockDataSource,
+		ipam.NewNextAvailableIPDataSource,
+		ipam.NewNextAvailableSubnetDataSource,
+
+		keys.NewTsigKeyDataSource,
+
+		misc.NewBfdtemplateDataSource,
+		misc.NewRulesetDataSource,
+
+		rpz.NewRecordRpzCnameClientipaddressdnDataSource,
+		rpz.NewRecordRpzNaptrDataSource,
+		rpz.NewRecordRpzTxtDataSource,
+		rpz.NewRecordRpzAaaaIpaddressDataSource,
 	}
 }
 
 func (p *InfobloxProvider) ListResources(_ context.Context) []func() list.ListResource {
 	return []func() list.ListResource{
+		acl.NewNamedaclList,
+
+		dhcp.NewDhcpOptiondefinitionList,
+		dhcp.NewDhcpOptionspaceList,
+		dhcp.NewFilteroptionList,
+		dhcp.NewHaGroupList,
+		dhcp.NewIpv6DhcpOptiondefinitionList,
+		dhcp.NewIpv6DhcpOptionspaceList,
+		dhcp.NewIpv6fixedaddressList,
+
+		dns.NewAuthNsgList,
+		dns.NewDnsServerList,
+		dns.NewForwardNsgList,
+		dns.NewNsgroupList,
+		dns.NewRecordAList,
 		dtc.NewDtcLbdnList,
 		dns.NewRecordSrvList,
 		dns.NewRecordNaptrList,
 		dns.NewRecordMxList,
 		dns.NewRecordCnameList,
 		dns.NewRecordAaaaList,
-		dns.NewRecordTxtList,
+		dns.NewRecordAliasList,
 		dns.NewRecordCaaList,
+		dns.NewRecordPtrList,
+		dns.NewRecordCnameList,
 		dns.NewRecordDnameList,
+		dns.NewRecordMxList,
+		dns.NewRecordNaptrList,
 		dns.NewRecordNsList,
-		dns.NewZoneAuthList,
+		dns.NewRecordSrvList,
+		dns.NewRecordTxtList,
+		dns.NewSharedrecordAList,
+		dns.NewSharedrecordAaaaList,
 		dns.NewViewList,
-		dns.NewRecordAList,
+		dns.NewZoneAuthList,
+		dns.NewZoneDelegatedList,
+		dns.NewZoneForwardList,
+		dns.NewZoneRpList,
+
+		dtc.NewDtcPoolList,
+		dtc.NewDtcServerList,
+
+		grid.NewExtensibleattributedefList,
+		grid.NewNatgroupList,
+		grid.NewUpgradegroupList,
 
 		ipam.NewAddressList,
+		ipam.NewIpv6networkList,
+		ipam.NewIpv6networkcontainerList,
 		ipam.NewNetworkList,
 		ipam.NewNetworkcontainerList,
+		ipam.NewNetworkviewList,
+
+		keys.NewTsigKeyList,
+
+		misc.NewBfdtemplateList,
+		misc.NewRulesetList,
+
+		rpz.NewRecordRpzCnameClientipaddressdnList,
+		rpz.NewRecordRpzNaptrList,
+		rpz.NewRecordRpzTxtList,
+		rpz.NewRecordRpzAaaaIpaddressList,
 	}
 }
 
