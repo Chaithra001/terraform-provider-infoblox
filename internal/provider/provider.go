@@ -25,7 +25,6 @@ import (
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/dns"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/dtc"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/grid"
-	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/dtc"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/ipam"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/keys"
 	"github.com/infobloxopen/terraform-provider-infoblox/internal/service/misc"
@@ -345,10 +344,6 @@ func (p *InfobloxProvider) Resources(_ context.Context) []func() resource.Resour
 		dns.NewNsgroupResource,
 		dns.NewRecordAResource,
 		dtc.NewDtcLbdnResource,
-		dns.NewRecordSrvResource,
-		dns.NewRecordNaptrResource,
-		dns.NewRecordMxResource,
-		dns.NewRecordCnameResource,
 		dns.NewRecordAaaaResource,
 		dns.NewRecordAliasResource,
 		dns.NewRecordCaaResource,
@@ -412,10 +407,6 @@ func (p *InfobloxProvider) DataSources(ctx context.Context) []func() datasource.
 		dns.NewNsgroupDataSource,
 		dns.NewRecordADataSource,
 		dtc.NewDtcLbdnDataSource,
-		dns.NewRecordSrvDataSource,
-		dns.NewRecordNaptrDataSource,
-		dns.NewRecordMxDataSource,
-		dns.NewRecordCnameDataSource,
 		dns.NewRecordAaaaDataSource,
 		dns.NewRecordAliasDataSource,
 		dns.NewRecordCaaDataSource,
@@ -482,10 +473,6 @@ func (p *InfobloxProvider) ListResources(_ context.Context) []func() list.ListRe
 		dns.NewNsgroupList,
 		dns.NewRecordAList,
 		dtc.NewDtcLbdnList,
-		dns.NewRecordSrvList,
-		dns.NewRecordNaptrList,
-		dns.NewRecordMxList,
-		dns.NewRecordCnameList,
 		dns.NewRecordAaaaList,
 		dns.NewRecordAliasList,
 		dns.NewRecordCaaList,
